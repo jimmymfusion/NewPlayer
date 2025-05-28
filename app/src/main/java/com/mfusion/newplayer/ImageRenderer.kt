@@ -15,6 +15,7 @@ import java.nio.FloatBuffer
 import javax.microedition.khronos.egl.EGLConfig
 import javax.microedition.khronos.opengles.GL10
 import android.opengl.GLES11Ext
+import java.util.concurrent.Executors
 
 class ImageRenderer(private val context: Context, private val glSurfaceView: GLSurfaceView) : GLSurfaceView.Renderer {
     private val TAG = "ImageRenderer"
@@ -130,7 +131,7 @@ class ImageRenderer(private val context: Context, private val glSurfaceView: GLS
 
     // FPS计算相关变量
     private var frameCount = 0
-    private var lastFpsUpdateTime = System.currentTimeMillis()
+    private var lastFpsUpdateTime = 0L
     private var currentFps = 0f
     private var fpsTextureId: Int = 0
     private var lastFpsText = ""
@@ -163,6 +164,8 @@ class ImageRenderer(private val context: Context, private val glSurfaceView: GLS
     private var videoTexCoordHandle: Int = 0
 
     private var isFirstSurfaceCreated = true // 新增标志位
+
+    private val textureExecutor = Executors.newSingleThreadExecutor()
 
     init {
         // 加载图片文件列表
@@ -271,6 +274,7 @@ class ImageRenderer(private val context: Context, private val glSurfaceView: GLS
 
             // 创建FPS显示纹理，使用初始值 0
             updateFpsTexture("FPS: 0.0")
+            lastFpsUpdateTime = System.currentTimeMillis()
 
             // Initialize video player and start playback only on the first surface creation
             videoPlayer?.createTexture()
@@ -572,29 +576,26 @@ class ImageRenderer(private val context: Context, private val glSurfaceView: GLS
             }
         }
 
-        // 绘制FPS显示
+        // 绘制FPS显示（左上角，小横条）
         if (fpsTextureId != 0) {
+            val fpsModelMatrix = FloatArray(16)
+            Matrix.setIdentityM(fpsModelMatrix, 0)
+            val fpsWidth = 3.0f
+            val fpsHeight = fpsWidth * 0.25f // 假设宽高比约为4:1
+            Matrix.translateM(fpsModelMatrix, 0, -8f + fpsWidth / 2f, 4.5f - fpsHeight / 2f, 0f)
+            Matrix.scaleM(fpsModelMatrix, 0, fpsWidth, fpsHeight, 1.0f)
+            Matrix.multiplyMM(mvpMatrix, 0, projectionMatrix, 0, fpsModelMatrix, 0)
+
             GLES20.glUseProgram(textureProgram)
-            
-            // 设置顶点属性
             GLES20.glEnableVertexAttribArray(texturePositionHandle)
             GLES20.glVertexAttribPointer(texturePositionHandle, 3, GLES20.GL_FLOAT, false, 0, vertexBuffer)
-            
             GLES20.glEnableVertexAttribArray(textureTexCoordHandle)
             GLES20.glVertexAttribPointer(textureTexCoordHandle, 2, GLES20.GL_FLOAT, false, 0, texCoordBuffer)
-            
-            // 设置纹理
             GLES20.glActiveTexture(GLES20.GL_TEXTURE0)
             GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, fpsTextureId)
             GLES20.glUniform1i(textureTextureHandle, 0)
-            
-            // 设置MVP矩阵
             GLES20.glUniformMatrix4fv(textureMvpMatrixHandle, 1, false, mvpMatrix, 0)
-            
-            // 绘制
             GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)
-            
-            // 清理
             GLES20.glDisableVertexAttribArray(texturePositionHandle)
             GLES20.glDisableVertexAttribArray(textureTexCoordHandle)
         }
@@ -608,7 +609,17 @@ class ImageRenderer(private val context: Context, private val glSurfaceView: GLS
             val vertexShader = loadShader(GLES20.GL_VERTEX_SHADER, vertexShaderCode)
             val fragmentShader = loadShader(GLES20.GL_FRAGMENT_SHADER, fragmentShaderCode)
             
+            if (vertexShader == 0 || fragmentShader == 0) {
+                Log.e(TAG, "Failed to create shaders")
+                return 0
+            }
+            
             val program = GLES20.glCreateProgram()
+            if (program == 0) {
+                Log.e(TAG, "Failed to create program")
+                return 0
+            }
+            
             GLES20.glAttachShader(program, vertexShader)
             GLES20.glAttachShader(program, fragmentShader)
             GLES20.glLinkProgram(program)
@@ -621,6 +632,10 @@ class ImageRenderer(private val context: Context, private val glSurfaceView: GLS
                 GLES20.glDeleteProgram(program)
                 return 0
             }
+
+            // 清理着色器
+            GLES20.glDeleteShader(vertexShader)
+            GLES20.glDeleteShader(fragmentShader)
 
             return program
         } catch (e: Exception) {
@@ -683,13 +698,7 @@ class ImageRenderer(private val context: Context, private val glSurfaceView: GLS
     }
 
     private fun updateFpsTexture(fpsText: String) {
-        // 只在 FPS 变化超过 1 时才更新纹理
-        val shouldSkip = if (lastFpsText.startsWith("FPS: ") && fpsText.startsWith("FPS: ")) {
-            val oldValue = lastFpsText.substringAfter("FPS: ").toFloatOrNull() ?: 0f
-            val newValue = fpsText.substringAfter("FPS: ").toFloatOrNull() ?: 0f
-            Math.abs(newValue - oldValue) < 1.0f
-        } else false
-        if (shouldSkip) return
+        Log.d(TAG, "updateFpsTexture called with: $fpsText")
         lastFpsText = fpsText
 
         if (fpsTextureId != 0) {
@@ -711,6 +720,30 @@ class ImageRenderer(private val context: Context, private val glSurfaceView: GLS
             bitmap.recycle()
             
             fpsTextureId = textureHandle[0]
+        }
+    }
+
+    private fun updateFpsTextureAsync(fpsText: String) {
+        Log.d(TAG, "updateFpsTextureAsync called with: $fpsText")
+        textureExecutor.execute {
+            val (bitmap, _) = textRenderer.createTextTexture(fpsText, 256)
+            glSurfaceView.queueEvent {
+                if (fpsTextureId != 0) {
+                    GLES20.glDeleteTextures(1, intArrayOf(fpsTextureId), 0)
+                }
+                val textureHandle = IntArray(1)
+                GLES20.glGenTextures(1, textureHandle, 0)
+                if (textureHandle[0] != 0) {
+                    GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, textureHandle[0])
+                    GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MIN_FILTER, GLES20.GL_LINEAR)
+                    GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MAG_FILTER, GLES20.GL_LINEAR)
+                    GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_WRAP_S, GLES20.GL_CLAMP_TO_EDGE)
+                    GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_WRAP_T, GLES20.GL_CLAMP_TO_EDGE)
+                    GLUtils.texImage2D(GLES20.GL_TEXTURE_2D, 0, bitmap, 0)
+                    bitmap.recycle()
+                    fpsTextureId = textureHandle[0]
+                }
+            }
         }
     }
 
@@ -743,11 +776,11 @@ class ImageRenderer(private val context: Context, private val glSurfaceView: GLS
     private fun startAnimation() {
         frameCallback = object : Choreographer.FrameCallback {
             override fun doFrame(frameTimeNanos: Long) {
-                // 更新动画状态
+                Log.d(TAG, "Choreographer doFrame called")
                 updateAnimationState(frameTimeNanos)
-                // 请求渲染
-                glSurfaceView.requestRender()
-                // 继续监听下一帧
+                if (Math.abs(targetOffset - currentOffset) > 0.001f) {
+                    glSurfaceView.requestRender()
+                }
                 choreographer.postFrameCallback(this)
             }
         }
@@ -762,6 +795,7 @@ class ImageRenderer(private val context: Context, private val glSurfaceView: GLS
     }
 
     private fun updateAnimationState(frameTimeNanos: Long) {
+        Log.d(TAG, "updateAnimationState called, frameCount=$frameCount, currentFps=$currentFps")
         // 计算时间差
         val deltaTime = if (lastFrameTime == 0L) {
             FRAME_TIME_NANOS
@@ -773,19 +807,24 @@ class ImageRenderer(private val context: Context, private val glSurfaceView: GLS
         // 更新动画状态
         totalTime += deltaTime / 1_000_000_000.0f
         
-        // 更新跑马灯位置
-        targetOffset = (totalTime * TICKER_SPEED) % 1.0f
-        currentOffset += (targetOffset - currentOffset) * TICKER_SMOOTH_FACTOR
+        // 跑马灯平滑循环，无倒退跳跃
+        val rawTarget = (totalTime * TICKER_SPEED) % 1.0f
+        var delta = rawTarget - currentOffset
+        if (delta < -0.5f) delta += 1.0f
+        if (delta > 0.5f) delta -= 1.0f
+        currentOffset = (currentOffset + delta * TICKER_SMOOTH_FACTOR) % 1.0f
+        if (currentOffset < 0f) currentOffset += 1.0f
         tickerOffset = currentOffset
 
-        // 更新FPS
+        // FPS统计逻辑...
         frameCount++
         val currentTimeMillis = System.currentTimeMillis()
         if (currentTimeMillis - lastFpsUpdateTime >= 1000) {  // 每秒更新一次FPS
             currentFps = frameCount * 1000f / (currentTimeMillis - lastFpsUpdateTime)
+            Log.d(TAG, "FPS updated: $currentFps, frameCount=$frameCount, interval=${currentTimeMillis - lastFpsUpdateTime}")
             frameCount = 0
             lastFpsUpdateTime = currentTimeMillis
-            updateFpsTexture(String.format("FPS: %.1f", currentFps))
+            updateFpsTextureAsync(String.format("FPS: %.1f", currentFps))
         }
     }
 

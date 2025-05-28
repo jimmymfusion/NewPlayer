@@ -46,8 +46,8 @@ class TextureTextRenderer(private val context: Context) {
         // 绘制文字，添加水平边距
         canvas.drawText(text, PADDING_X, y, paint)
 
-        // 保存bitmap到文件
-        saveBitmapToFile(bitmap, text)
+        // 移除保存bitmap到文件的调试代码
+        // saveBitmapToFile(bitmap, text)
         
         return Pair(bitmap, textWidth + PADDING_X * 2)  // 返回包含边距的总宽度
     }
